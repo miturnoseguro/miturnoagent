@@ -1,50 +1,111 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// WhatsApp Cloud API (Meta) — envío de mensajes
+// WhatsApp vía Baileys (no oficial) — conexión tipo WhatsApp Web, sin Meta.
+//
+// Diferencia clave con la versión de Meta Cloud API: acá no hay webhook.
+// La conexión es un socket persistente: se inicia una vez (con iniciar()) y
+// empuja los mensajes entrantes por eventos. Por eso server.js ya no expone
+// /webhook — en su lugar llama a iniciar(handler) al arrancar.
+//
+// Primera vez que corras esto: va a aparecer un QR en la terminal. Escaneálo
+// desde WhatsApp > Dispositivos vinculados > Vincular un dispositivo.
+// La sesión queda guardada en la carpeta ./auth_info (agregala a .gitignore).
 // ─────────────────────────────────────────────────────────────────────────────
 
-const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
-const PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID;
-const GRAPH_VERSION = 'v20.0';
+const {
+  default: makeWASocket,
+  useMultiFileAuthState,
+  DisconnectReason,
+  fetchLatestBaileysVersion
+} = require('@whiskeysockets/baileys');
+const qrcode = require('qrcode-terminal');
+const pino = require('pino');
+const path = require('path');
 
-async function enviarTexto(telefono, texto) {
-  const url = `https://graph.facebook.com/${GRAPH_VERSION}/${PHONE_NUMBER_ID}/messages`;
-  const body = {
-    messaging_product: 'whatsapp',
-    to: telefono,
-    type: 'text',
-    text: { body: texto }
-  };
-  const resp = await fetch(url, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${WHATSAPP_TOKEN}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify(body)
+const AUTH_DIR = path.join(__dirname, 'auth_info');
+
+let sock = null;
+let mensajeHandler = null; // callback({ telefono, texto }) que setea server.js
+
+// Arranca (o reconecta) la sesión de WhatsApp. `onMensaje` es el callback que
+// se llama por cada mensaje de texto entrante.
+async function iniciar(onMensaje) {
+  if (onMensaje) mensajeHandler = onMensaje;
+
+  const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+  const { version } = await fetchLatestBaileysVersion();
+
+  sock = makeWASocket({
+    version,
+    auth: state,
+    logger: pino({ level: 'silent' }),
+    browser: ['Mi Turno Seguro', 'Chrome', '1.0.0']
   });
-  if (!resp.ok) {
-    const err = await resp.text();
-    console.error('Error enviando WhatsApp:', err);
-  }
-  return resp.ok;
-}
 
-// Extrae el mensaje de texto entrante de un payload de webhook de Meta.
-// Devuelve null si el evento no es un mensaje de texto (ej: status update).
-function extraerMensajeEntrante(body) {
-  try {
-    const entry = body.entry?.[0];
-    const change = entry?.changes?.[0];
-    const value = change?.value;
-    const mensaje = value?.messages?.[0];
-    if (!mensaje) return null;
-    if (mensaje.type !== 'text') {
-      return { telefono: mensaje.from, texto: null, tipoNoSoportado: mensaje.type };
+  sock.ev.on('creds.update', saveCreds);
+
+  sock.ev.on('connection.update', (update) => {
+    const { connection, lastDisconnect, qr } = update;
+
+    if (qr) {
+      console.log('\n📱 Escaneá este QR desde WhatsApp > Dispositivos vinculados:\n');
+      qrcode.generate(qr, { small: true });
     }
-    return { telefono: mensaje.from, texto: mensaje.text.body };
+
+    if (connection === 'close') {
+      const statusCode = lastDisconnect?.error?.output?.statusCode;
+      const debeReconectar = statusCode !== DisconnectReason.loggedOut;
+      console.log(
+        '🔌 Conexión de WhatsApp cerrada.',
+        debeReconectar ? 'Reintentando...' : 'Sesión cerrada — borrá auth_info/ y volvé a escanear el QR.'
+      );
+      if (debeReconectar) iniciar();
+    } else if (connection === 'open') {
+      console.log('✅ Conectado a WhatsApp (Baileys)');
+    }
+  });
+
+  sock.ev.on('messages.upsert', async ({ messages, type }) => {
+    if (type !== 'notify') return;
+
+    for (const msg of messages) {
+      if (!msg.message || msg.key.fromMe) continue;
+
+      const remoteJid = msg.key.remoteJid || '';
+      if (remoteJid.endsWith('@g.us')) continue; // ignoramos grupos por ahora
+
+      const telefono = remoteJid.replace('@s.whatsapp.net', '');
+      const texto =
+        msg.message.conversation ||
+        msg.message.extendedTextMessage?.text ||
+        null;
+
+      if (!mensajeHandler) continue;
+
+      try {
+        await mensajeHandler({ telefono, texto });
+      } catch (e) {
+        console.error('Error en el handler de mensaje entrante:', e);
+      }
+    }
+  });
+
+  return sock;
+}
+
+// Misma firma que la versión de Meta: enviarTexto(telefono, texto) -> boolean
+async function enviarTexto(telefono, texto) {
+  if (!sock) {
+    console.error('Error enviando WhatsApp: el socket todavía no está conectado');
+    return false;
+  }
+  const jid = telefono.includes('@') ? telefono : `${telefono}@s.whatsapp.net`;
+  try {
+    await sock.sendMessage(jid, { text: texto });
+    return true;
   } catch (e) {
-    return null;
+    console.error('Error enviando WhatsApp:', e);
+    return false;
   }
 }
 
-module.exports = { enviarTexto, extraerMensajeEntrante };
+module.exports = { iniciar, enviarTexto };
