@@ -1,0 +1,12 @@
+# URL de tu Apps Script existente (el mismo SCRIPT_URL que ya usás)
+APPS_SCRIPT_URL=https://script.google.com/macros/s/AKfycbzWBsaQ6VMOf_lezKhXKeV0-xmFdCS_92K7bNQ3W-yI3xfpVaMfdo6f8wKSStE9eZG3yA/exec
+
+# Claude API — https://console.anthropic.com
+ANTHROPIC_API_KEY=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
+
+# Twilio — Account Info en el Dashboard
+TWILIO_ACCOUNT_SID=ACdb037e072e317afe60375dcd3253040e
+TWILIO_AUTH_TOKEN=7f4df387452320eb94c66e50506f4cc2
+TWILIO_WHATSAPP_FROM=whatsapp:+14155238886
+
+PORT=3000
